@@ -18,18 +18,29 @@ pub trait CameraBuilder {
         let mut ptz_service       = parse_soap(&response[..], "XAddr", Some("PTZ"),         true, false);
         let mut image_service     = parse_soap(&response[..], "XAddr", Some("Imaging"),     true, false);
 
-        info!("media_service: {}", media_service[0]);
-        info!("event_service: {}", event_service[0]);
-        info!("analytics_service: {}", analytics_service[0]);
-        info!("ptz_service: {}", ptz_service[0]);
-        info!("image_service: {}", image_service[0]);
-
         let mut result         = Capabilities::default();
-        result.url_media       = Some(media_service.remove(0).parse()?);
-        result.url_events      = Some(event_service.remove(0).parse()?);
-        result.url_analytics   = Some(analytics_service.remove(0).parse()?);
-        result.url_ptz         = Some(ptz_service.remove(0).parse()?);
-        result.url_imaging     = Some(image_service.remove(0).parse()?);
+
+        // 先校验向量非空再访问第一个元素
+        if let Some(uri) = media_service.get(0) {
+            info!("media_service: {}", uri);
+            result.url_media       = Some(media_service.remove(0).parse()?);
+        }
+        if let Some(uri) = event_service.get(0) {
+            info!("event_service: {}", uri);
+             result.url_events      = Some(event_service.remove(0).parse()?);
+        }
+        if let Some(uri) = analytics_service.get(0) {
+            info!("analytics_service: {}", uri);
+            result.url_analytics   = Some(analytics_service.remove(0).parse()?);
+        }
+        if let Some(uri) = ptz_service.get(0) {
+            info!("ptz_service: {}", uri);
+            result.url_ptz         = Some(ptz_service.remove(0).parse()?);
+        }
+        if let Some(uri) = image_service.get(0) {
+            info!("image_service: {}", uri);
+            result.url_imaging     = Some(image_service.remove(0).parse()?);
+        }
 
         Ok(result)
     }
