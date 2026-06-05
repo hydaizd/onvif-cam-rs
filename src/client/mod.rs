@@ -90,7 +90,7 @@ pub async fn discover() -> Result<Vec<Device>> {
 
         // Send the SOAP message over UDP
         // Use default IP and Port
-        let success = udp_client.send_to(msg_discover.as_ref(), addr_send).await?;
+        udp_client.send_to(msg_discover.as_ref(), addr_send).await?;
 
         while try_recv < 5 {
             try_recv += 1;
@@ -224,7 +224,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                      <w:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action>
                      </e:Header>"#;
 
-    let suffix = "</Body></Envelope><Header/>";
+    let suffix = "</Body></Envelope>";
     let suffix_discovery = r#"<e:Body>
                                    <d:Probe>
                                        <d:Types>dn:NetworkVideoTransmitter</d:Types>
