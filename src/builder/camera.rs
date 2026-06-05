@@ -55,15 +55,25 @@ pub trait CameraBuilder {
         let mut model                = parse_soap(&response[..], "Model",            None, true, false);
         let mut manufacturer         = parse_soap(&response[..], "Manufacturer",     None, true, false);
 
-        info!("Manufacturer: {}", manufacturer[0]);
-        info!("Model: {}", model[0]);
+        let mut result             = DeviceInfo::default();
 
-        let mut result             = DeviceInfo::default(); 
-        result.firmware_version    = Some(firmware_version.remove(0));
-        result.serial_num          = Some(serial_number.remove(0));
-        result.hardware_id         = Some(hardware_id.remove(0));
-        result.model               = Some(model.remove(0));
-        result.manufacturer        = Some(manufacturer.remove(0));
+        if let Some(val) = manufacturer.get(0) {
+            info!("Manufacturer: {}", val);
+            result.manufacturer        = Some(manufacturer.remove(0));
+        }
+        if let Some(val) = model.get(0) {
+            info!("Model: {}", val);
+            result.model               = Some(model.remove(0));
+        }
+        if let Some(_) = firmware_version.get(0) {
+            result.firmware_version    = Some(firmware_version.remove(0));
+        }
+        if let Some(_) = serial_number.get(0) {
+            result.serial_num          = Some(serial_number.remove(0));
+        }
+        if let Some(_) = hardware_id.get(0) {
+            result.hardware_id         = Some(hardware_id.remove(0));
+        }
 
         Ok(result)
     }
@@ -78,20 +88,33 @@ pub trait CameraBuilder {
         let mut audio_codec       = parse_soap(&response[..], "Encoding",       Some("AudioEncoderConfiguration"),    true, false);
         let mut h264_profile      = parse_soap(&response[..], "H264Profile",    None,                                 true, false);
 
-        info!("Video Codec: {}", video_codec[0]);
-        info!("Audio Codec: {}", audio_codec[0]);
-        info!("H264 Profile: {}", h264_profile[0]);
-        info!(
-            "Video dimensions: {} x {}",
-            width[0],
-            height[0]
-        );
+        let mut result         = Profiles::default();
 
-        let mut result         = Profiles::default(); 
-        result.video_dim       = Some((width[0].parse().unwrap(), height[0].parse().unwrap()));
-        result.audio_codec     = Some(audio_codec.remove(0));
-        result.h264_profile    = Some(h264_profile.remove(0));
-        result.video_codec     = Some(video_codec.remove(0));
+        if let Some(val) = video_codec.get(0) {
+            info!("Video Codec: {}", val);
+            result.video_codec     = Some(video_codec.remove(0));
+        }
+        if let Some(val) = audio_codec.get(0) {
+            info!("Audio Codec: {}", val);
+            result.audio_codec     = Some(audio_codec.remove(0));
+        }
+        if let Some(val) = h264_profile.get(0) {
+            info!("H264 Profile: {}", val);
+            result.h264_profile    = Some(h264_profile.remove(0));
+        }
+
+        match (width.get(0), height.get(0)) {
+            (Some(val_w), Some(val_h)) => {
+                info!("Video dimensions: {} x {}", val_w, val_h);
+                // 解析失败时返回 None，不会 panic
+                let w = val_w.parse().ok();
+                let h = val_h.parse().ok();
+                if let (Some(w), Some(h)) = (w, h) {
+                    result.video_dim = Some((w, h));
+                }
+            }
+            _ => {}
+        }
 
         Ok(result)
     }
@@ -104,12 +127,18 @@ pub trait CameraBuilder {
         let mut timeout                   = parse_soap(&response[..], "Timeout",             None, true, false);
         let mut url_string                = parse_soap(&response[..], "Uri",                 None, true, false);
 
-        info!("RTSP URL: {}", url_string[0]);
-        
-        let mut result                 = StreamUri::default(); 
-        result.invalid_connect         = Some(invalid_after_connect.remove(0));
-        result.uri                     = Some(url_string           .remove(0));
-        result.timeout                 = Some(timeout              .remove(0));
+        let mut result                 = StreamUri::default();
+
+        if let Some(val) = url_string.get(0) {
+            info!("RTSP URL: {}", val);
+            result.uri = Some(url_string.remove(0));
+        }
+        if let Some(_) = invalid_after_connect.get(0) {
+            result.invalid_connect = Some(invalid_after_connect.remove(0));
+        }
+        if let Some(_) = timeout.get(0) {
+            result.timeout = Some(timeout.remove(0));
+        }
 
         Ok(result)
     }
@@ -143,14 +172,14 @@ pub trait CameraBuilder {
 
     async fn set_service_capabilities<T>(onvif_url: url::Url) -> Result<T>
     where
-        T: ServiceCapabilities + Default
+        T: ServiceCapabilities + Default,
     {
         debug!("Event Service URL: {onvif_url}");
-        let response         = client::send(onvif_url, Messages::GetServiceCapabilities).await?;
-        let resp1            = response.text().await?;
-        let resp2            = resp1.as_bytes();
-        let capabilities     = parse_soap(&resp2[..], "Capabilities", None, true, true);
-        let mut result       = T::default();
+        let response = client::send(onvif_url, Messages::GetServiceCapabilities).await?;
+        let resp1 = response.text().await?;
+        let resp2 = resp1.as_bytes();
+        let capabilities = parse_soap(&resp2[..], "Capabilities", None, true, true);
+        let mut result = T::default();
 
         // debug!("Get capabilities: \n{resp1}");
 
@@ -163,7 +192,7 @@ pub trait CameraBuilder {
 
         Ok(result)
     }
-    
+
     #[rustfmt::skip]
     async fn set_analytics_configurations(onvif_url: url::Url) -> Result<AnalyticsConfigList> {
         let response         = client::send(onvif_url, Messages::GetAnalyticsConfigurations).await?;
@@ -209,7 +238,7 @@ pub trait CameraBuilder {
 
         Ok(())
     }
-    
+
     #[rustfmt::skip]
     async fn set_service_profiles(onvif_url: url::Url) -> Result<()> {
         let response                      = client::send(onvif_url, Messages::GetProfiles).await?;
@@ -220,7 +249,7 @@ pub trait CameraBuilder {
 
         Ok(())
     }
-    
+
     #[rustfmt::skip]
     async fn set_dns(onvif_url: url::Url) -> Result<()> {
         let response                      = client::send(onvif_url, Messages::GetDNS).await?;
@@ -233,35 +262,35 @@ pub trait CameraBuilder {
     }
 
     async fn set_dot11_status(onvif_url: url::Url) -> Result<()> {
-        let response                      = client::send(onvif_url, Messages::GetDot11Status).await?;
+        let response = client::send(onvif_url, Messages::GetDot11Status).await?;
         // let response                      = response.bytes().await?;
-        let response                      = response.text().await?;
+        let response = response.text().await?;
 
         trace!("Get Dot11 Status\n {response}");
 
         Ok(())
     }
-    
+
     async fn set_geo_location(onvif_url: url::Url) -> Result<()> {
-        let response                      = client::send(onvif_url, Messages::GetGeoLocation).await?;
+        let response = client::send(onvif_url, Messages::GetGeoLocation).await?;
         // let response                      = response.bytes().await?;
-        let response                      = response.text().await?;
+        let response = response.text().await?;
 
         trace!("Get Geo Location\n {response}");
-        
+
         Ok(())
     }
-    
+
     async fn set_pull_point_sub(onvif_url: url::Url) -> Result<()> {
         debug!("Event Service URL: {onvif_url}");
-        let response                      = client::send(onvif_url, Messages::CreatePullPointSubscriptionRequest).await?;
+        let response = client::send(onvif_url, Messages::CreatePullPointSubscriptionRequest).await?;
         // let response                      = response.bytes().await?;
-        let response                      = response.text().await?;
+        let response = response.text().await?;
 
         debug!("Get Pull Point Subscription\n {response}");
 
         Ok(())
     }
-    
+
     async fn build_all(&mut self) -> Result<()>;
 }
