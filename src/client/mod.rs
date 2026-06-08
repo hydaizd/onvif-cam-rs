@@ -8,9 +8,12 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::{net::UdpSocket, time::timeout};
 use url::Url;
 use uuid::Uuid;
+use std::sync::OnceLock;
 
 const DISCOVER_URI: &'static str = "239.255.255.250:3702";
 const CLIENT_LISTEN_IP: &'static str = "0.0.0.0:0"; // notice port is 0
+const MAX_RETRIES: usize = 5;
+const TIMEOUT_SECS: u64 = 1;
 
 /// All of the ONVIF requests that this program plans to support
 #[derive(Debug)]
@@ -172,9 +175,6 @@ pub async fn discover() -> Result<Vec<Device>> {
 /// println!("RTP port for streaming video: {stream_url}");
 /// ```
 pub async fn send(onvif_url: url::Url, msg: Messages) -> Result<Response> {
-    const MAX_RETRIES: usize = 5;
-    const TIMEOUT_SECS: u64 = 1;
-
     // Only generate uuid for Discovery messages that actually use it
     let uuid = match msg {
         Messages::Discovery => Uuid::new_v4(),
@@ -213,7 +213,6 @@ pub async fn send(onvif_url: url::Url, msg: Messages) -> Result<Response> {
 
 /// Returns a shared reqwest::Client with sensible defaults for ONVIF communication.
 fn reqwest_client() -> &'static reqwest::Client {
-    use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
