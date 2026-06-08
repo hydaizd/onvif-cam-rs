@@ -1,10 +1,13 @@
-use crate::device::{Services, Capabilities, DeviceInfo, Profiles, StreamUri, EventCapabilities, ServiceCapabilities, AnalyticsConfigList};
-use crate::utils::parse_soap;
 use crate::client::{self, Messages};
+use crate::device::{
+    AnalyticsConfigList, Capabilities, DeviceInfo, EventCapabilities, Profiles,
+    ServiceCapabilities, Services, StreamUri,
+};
+use crate::utils::parse_soap;
 
-use log::{error, trace, debug, info};
 use anyhow::Result;
 use async_trait::async_trait;
+use log::{debug, error, info, trace};
 
 #[async_trait]
 pub trait CameraBuilder {
@@ -148,19 +151,20 @@ pub trait CameraBuilder {
         let response         = client::send(onvif_url, Messages::GetServices).await?;
         let response         = response.bytes().await?;
         let services         = parse_soap(&response[..], "XAddr", None, false, false);
-        let mut result       = Services::default(); 
+        let mut result       = Services::default();
 
         for service in services {
             info!("Service: {}", service);
-            
+
             // Match Service URL Address by keywords
-            match &service {
+            let service_lower = service.to_lowercase();
+            match &service_lower {
                 s if s.contains("device_service")    =>(),
                 s if s.contains("analytics")         => result.analytics    = Some(service.clone()),
                 s if s.contains("event")             => result.event        = Some(service.clone()),
                 s if s.contains("deviceIO")          => result.io           = Some(service.clone()),
                 s if s.contains("imaging")           => result.imaging      = Some(service.clone()),
-                s if s.contains("media_service")     => result.media        = Some(service.clone()),
+                s if s.contains("media")             => result.media        = Some(service.clone()),
                 s if s.contains("media2")            => result.media2       = Some(service.clone()),
                 s if s.contains("ptz")               => result.ptz          = Some(service.clone()),
                 _ => error!("Encountered unknown Service"),
@@ -199,7 +203,7 @@ pub trait CameraBuilder {
         let resp1            = response.text().await?;
         // let resp2            = resp1.as_bytes();
         // let capabilities     = parse_soap(&resp2[..], "Capabilities", None, true, true);
-        let mut result       = AnalyticsConfigList::default(); 
+        let result = AnalyticsConfigList::default();
 
         debug!("Get analytics configs: \n{resp1}");
 
@@ -283,7 +287,8 @@ pub trait CameraBuilder {
 
     async fn set_pull_point_sub(onvif_url: url::Url) -> Result<()> {
         debug!("Event Service URL: {onvif_url}");
-        let response = client::send(onvif_url, Messages::CreatePullPointSubscriptionRequest).await?;
+        let response =
+            client::send(onvif_url, Messages::CreatePullPointSubscriptionRequest).await?;
         // let response                      = response.bytes().await?;
         let response = response.text().await?;
 

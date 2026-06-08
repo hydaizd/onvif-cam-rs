@@ -4,11 +4,11 @@ use crate::utils::parse_soap;
 use anyhow::{anyhow, Result};
 use log::trace;
 use reqwest::Response;
+use std::sync::OnceLock;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{net::UdpSocket, time::timeout};
 use url::Url;
 use uuid::Uuid;
-use std::sync::OnceLock;
 
 const DISCOVER_URI: &'static str = "239.255.255.250:3702";
 const CLIENT_LISTEN_IP: &'static str = "0.0.0.0:0"; // notice port is 0
@@ -198,7 +198,9 @@ pub async fn send(onvif_url: url::Url, msg: Messages) -> Result<Response> {
                 eprintln!("[Client][send] Request error (attempt {attempt}/{MAX_RETRIES}): {e}");
             }
             Err(_) => {
-                eprintln!("[Client][send] Timeout waiting for response (attempt {attempt}/{MAX_RETRIES})");
+                eprintln!(
+                    "[Client][send] Timeout waiting for response (attempt {attempt}/{MAX_RETRIES})"
+                );
             }
         }
 
@@ -208,7 +210,9 @@ pub async fn send(onvif_url: url::Url, msg: Messages) -> Result<Response> {
         }
     }
 
-    Err(anyhow!("[Client] Failed to get response after {MAX_RETRIES} attempts"))
+    Err(anyhow!(
+        "[Client] Failed to get response after {MAX_RETRIES} attempts"
+    ))
 }
 
 /// Returns a shared reqwest::Client with sensible defaults for ONVIF communication.
@@ -217,7 +221,7 @@ fn reqwest_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(5)//复用 TCP 连接
+            .pool_max_idle_per_host(5) //复用 TCP 连接
             .build()
             .expect("Failed to create reqwest client")
     })
