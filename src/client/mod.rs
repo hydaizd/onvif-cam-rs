@@ -218,6 +218,15 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                         xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery"
                         xmlns:dn="http://www.onvif.org/ver10/network/wsdl">"#;
 
+    let prefix_profiles = r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
+                         xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
+                 <Body>"#;
+
+    let prefix_stream_uri = r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
+                         xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+                         xmlns:tt="http://www.onvif.org/ver10/schema">
+                 <Body>"#;
+
     // Insert UUID in the MessageID here
     let header_pt1 = format!("<e:Header><w:MessageID>uuid:{uuid}</w:MessageID>");
     let header_pt2 = r#"<w:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>
@@ -268,14 +277,14 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
         ),
         Messages::Profiles => format!(
             "
-                {prefix}
+                {prefix_profiles}
                 <trt:GetProfiles/>
                 {suffix}
             "
         ),
         Messages::GetStreamURI => format!(
             "
-                {prefix}
+                {prefix_stream_uri}
                 {stream}
                 {suffix}
             "
@@ -324,6 +333,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                 {suffix}
             "
         ),
+        ///wifi功能
         Messages::GetDot11Capabilities => format!(
             "
                 {prefix}
@@ -331,6 +341,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                 {suffix}
             "
         ),
+        ///wifi连接状态
         Messages::GetDot11Status => format!(
             "
                 {prefix}
@@ -338,6 +349,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                 {suffix}
             "
         ),
+        ///部分设备支持
         Messages::GetSystemUris => format!(
             "
                 {prefix}
@@ -345,6 +357,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                 {suffix}
             "
         ),
+        ///部分设备支持
         Messages::GetSystemLog => format!(
             "
                 {prefix}
