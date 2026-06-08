@@ -3,7 +3,7 @@ use crate::utils::parse_soap;
 
 use anyhow::{anyhow, Result};
 use log::trace;
-use reqwest::{RequestBuilder, Response};
+use reqwest::Response;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{net::UdpSocket, time::timeout};
 use url::Url;
@@ -172,39 +172,56 @@ pub async fn discover() -> Result<Vec<Device>> {
 /// println!("RTP port for streaming video: {stream_url}");
 /// ```
 pub async fn send(onvif_url: url::Url, msg: Messages) -> Result<Response> {
-    let uuid = Uuid::new_v4();
-    let mut try_times = 0;
+    const MAX_RETRIES: usize = 5;
+    const TIMEOUT_SECS: u64 = 1;
 
-    // Try to send the reqwest try_times (5)
-    // with a 1sec timemout for each reqwest
+    // Only generate uuid for Discovery messages that actually use it
+    let uuid = match msg {
+        Messages::Discovery => Uuid::new_v4(),
+        _ => Uuid::nil(),
+    };
     let soap_msg = soap_msg(&msg, uuid);
-    let client = reqwest::Client::new();
+    let client = reqwest_client();
 
-    'read: loop {
-        try_times += 1;
-
-        if try_times == 5 {
-            break 'read;
-        }
-
-        // Create HTTP request using onvif_url
-        let request: RequestBuilder = client
-            .post(onvif_url.clone())
+    for attempt in 1..=MAX_RETRIES {
+        let request = client
+            .post(onvif_url.as_str())
             .header("Content-Type", "application/soap+xml; charset=utf-8")
             .body(soap_msg.clone());
 
-        // Send the HTTP request and receive the response
-        match timeout(Duration::from_secs(1), request.send()).await {
-            Ok(resp) => {
-                trace!("SOAP reply for {msg:?}: {resp:?}");
-                let response = resp?;
+        match timeout(Duration::from_secs(TIMEOUT_SECS), request.send()).await {
+            Ok(Ok(response)) => {
+                trace!("SOAP reply for {msg:?}: {response:?}");
                 return Ok(response);
             }
-            Err(_) => println!("[Discover][send] Error waiting for response, trying again..."),
-        };
+            Ok(Err(e)) => {
+                eprintln!("[Client][send] Request error (attempt {attempt}/{MAX_RETRIES}): {e}");
+            }
+            Err(_) => {
+                eprintln!("[Client][send] Timeout waiting for response (attempt {attempt}/{MAX_RETRIES})");
+            }
+        }
+
+        // Small backoff before retry (except after last attempt)
+        if attempt < MAX_RETRIES {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
-    Err(anyhow!("[Client] Error getting response from message"))
+    Err(anyhow!("[Client] Failed to get response after {MAX_RETRIES} attempts"))
+}
+
+/// Returns a shared reqwest::Client with sensible defaults for ONVIF communication.
+fn reqwest_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(5)//复用 TCP 连接
+            .build()
+            .expect("Failed to create reqwest client")
+    })
 }
 
 pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
@@ -333,7 +350,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                 {suffix}
             "
         ),
-        ///wifi功能
+        // wifi功能
         Messages::GetDot11Capabilities => format!(
             "
                 {prefix}
@@ -341,7 +358,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                 {suffix}
             "
         ),
-        ///wifi连接状态
+        // wifi连接状态
         Messages::GetDot11Status => format!(
             "
                 {prefix}
@@ -349,7 +366,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                 {suffix}
             "
         ),
-        ///部分设备支持
+        // 仅部分设备支持
         Messages::GetSystemUris => format!(
             "
                 {prefix}
@@ -357,7 +374,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                 {suffix}
             "
         ),
-        ///部分设备支持
+        // 仅部分设备支持
         Messages::GetSystemLog => format!(
             "
                 {prefix}
