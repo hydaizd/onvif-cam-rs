@@ -31,6 +31,7 @@ use anyhow::Result;
 use onvif_cam_rs::builder::camera::CameraBuilder;
 use onvif_cam_rs::client::{self, Messages};
 use onvif_cam_rs::device::camera::Camera;
+use onvif_cam_rs::device::Auth;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,6 +43,8 @@ async fn main() -> Result<()> {
     // Enumerate all Camera devices found
     for device in devices {
         let mut camera = Camera::new(device);
+        // Set auth if camera requires it
+        // camera.auth = Some(Auth::new("admin", "password"));
         camera.build_all().await?;
         cameras.push(camera);
     }
@@ -63,10 +66,13 @@ A super simple Camera device object creation can go like this:
 use anyhow::Result;
 use onvif_cam_rs::builder::camera::CameraBuilder;
 use onvif_cam_rs::device::camera::Camera;
+use onvif_cam_rs::device::Auth;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut camera = Camera::from("http://192.168.1.100:8080/onvif/device_service");
+    // Set auth if camera requires WS-Security UsernameToken authentication
+    camera.auth = Some(Auth::new("admin", "password"));
     camera.build_all().await?;
 
     Ok(())

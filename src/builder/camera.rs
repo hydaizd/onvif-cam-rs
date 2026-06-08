@@ -1,6 +1,6 @@
 use crate::client::{self, Messages};
 use crate::device::{
-    AnalyticsConfigList, Capabilities, DeviceInfo, EventCapabilities, Profiles,
+    AnalyticsConfigList, Auth, Capabilities, DeviceInfo, EventCapabilities, Profiles,
     ServiceCapabilities, Services, StreamUri,
 };
 use crate::utils::parse_soap;
@@ -12,8 +12,8 @@ use log::{debug, error, info, trace};
 #[async_trait]
 pub trait CameraBuilder {
     #[rustfmt::skip]
-    async fn set_capabilities(onvif_url: url::Url) -> Result<Capabilities> {
-        let response              = client::send(onvif_url, Messages::Capabilities).await?;
+    async fn set_capabilities(onvif_url: url::Url, auth: Option<&Auth>) -> Result<Capabilities> {
+        let response              = client::send(onvif_url, Messages::Capabilities, auth).await?;
         let response              = response.bytes().await?;
         let mut media_service     = parse_soap(&response[..], "XAddr", Some("Media"),       true, false);
         let mut event_service     = parse_soap(&response[..], "XAddr", Some("Events"),      true, false);
@@ -49,8 +49,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_device_info(onvif_url: url::Url) -> Result<DeviceInfo> {
-        let response                 = client::send(onvif_url, Messages::DeviceInfo).await?;
+    async fn set_device_info(onvif_url: url::Url, auth: Option<&Auth>) -> Result<DeviceInfo> {
+        let response                 = client::send(onvif_url, Messages::DeviceInfo, auth).await?;
         let response                 = response.bytes().await?;
         let mut firmware_version     = parse_soap(&response[..], "FirmwareVersion",  None, true, false);
         let mut serial_number        = parse_soap(&response[..], "SerialNumber",     None, true, false);
@@ -82,9 +82,10 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_profiles(onvif_url: url::Url) -> Result<Profiles> {
-        let response              = client::send(onvif_url, Messages::Profiles).await?;
+    async fn set_profiles(onvif_url: url::Url, auth: Option<&Auth>) -> Result<Profiles> {
+        let response              = client::send(onvif_url, Messages::Profiles, auth).await?;
         let response              = response.bytes().await?;
+        let token_attrs           = parse_soap(&response[..], "Profiles",       None,                                 true, true);
         let width                 = parse_soap(&response[..], "Width",          None,                                 true, false);
         let height                = parse_soap(&response[..], "Height",         None,                                 true, false);
         let mut video_codec       = parse_soap(&response[..], "Encoding",       Some("VideoEncoderConfiguration"),    true, false);
@@ -92,6 +93,17 @@ pub trait CameraBuilder {
         let mut h264_profile      = parse_soap(&response[..], "H264Profile",    None,                                 true, false);
 
         let mut result         = Profiles::default();
+
+        // Extract the profile token from attributes (e.g. token="profile_1")
+        for attr in &token_attrs {
+            if let Some(val) = attr.strip_prefix("token=") {
+                // Strip surrounding quotes
+                let val = val.trim_matches('"');
+                result.token = Some(val.to_string());
+                info!("Profile token: {}", val);
+                break;
+            }
+        }
 
         if let Some(val) = video_codec.get(0) {
             info!("Video Codec: {}", val);
@@ -123,8 +135,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_stream_uri(onvif_url: url::Url) -> Result<StreamUri> {
-        let response                      = client::send(onvif_url, Messages::GetStreamURI).await?;
+    async fn set_stream_uri(onvif_url: url::Url, profile_token: &str, auth: Option<&Auth>) -> Result<StreamUri> {
+        let response                      = client::send(onvif_url, Messages::GetStreamURI(profile_token.to_string()), auth).await?;
         let response                      = response.bytes().await?;
         let mut invalid_after_connect     = parse_soap(&response[..], "InvalidAfterConnect", None, true, false);
         let mut timeout                   = parse_soap(&response[..], "Timeout",             None, true, false);
@@ -147,8 +159,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_services(onvif_url: url::Url) -> Result<Services> {
-        let response         = client::send(onvif_url, Messages::GetServices).await?;
+    async fn set_services(onvif_url: url::Url, auth: Option<&Auth>) -> Result<Services> {
+        let response         = client::send(onvif_url, Messages::GetServices, auth).await?;
         let response         = response.bytes().await?;
         let services         = parse_soap(&response[..], "XAddr", None, false, false);
         let mut result       = Services::default();
@@ -164,8 +176,8 @@ pub trait CameraBuilder {
                 s if s.contains("event")             => result.event        = Some(service.clone()),
                 s if s.contains("deviceIO")          => result.io           = Some(service.clone()),
                 s if s.contains("imaging")           => result.imaging      = Some(service.clone()),
+                s if s.contains("media2")            => result.media2       = Some(service.clone()),//优先匹配media2
                 s if s.contains("media")             => result.media        = Some(service.clone()),
-                s if s.contains("media2")            => result.media2       = Some(service.clone()),
                 s if s.contains("ptz")               => result.ptz          = Some(service.clone()),
                 _ => error!("Encountered unknown Service"),
             }
@@ -174,12 +186,12 @@ pub trait CameraBuilder {
         Ok(result)
     }
 
-    async fn set_service_capabilities<T>(onvif_url: url::Url) -> Result<T>
+    async fn set_service_capabilities<T>(onvif_url: url::Url, auth: Option<&Auth>) -> Result<T>
     where
         T: ServiceCapabilities + Default,
     {
         debug!("Event Service URL: {onvif_url}");
-        let response = client::send(onvif_url, Messages::GetServiceCapabilities).await?;
+        let response = client::send(onvif_url, Messages::GetServiceCapabilities, auth).await?;
         let resp1 = response.text().await?;
         let resp2 = resp1.as_bytes();
         let capabilities = parse_soap(&resp2[..], "Capabilities", None, true, true);
@@ -198,8 +210,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_analytics_configurations(onvif_url: url::Url) -> Result<AnalyticsConfigList> {
-        let response         = client::send(onvif_url, Messages::GetAnalyticsConfigurations).await?;
+    async fn set_analytics_configurations(onvif_url: url::Url, auth: Option<&Auth>) -> Result<AnalyticsConfigList> {
+        let response         = client::send(onvif_url, Messages::GetAnalyticsConfigurations, auth).await?;
         let resp1            = response.text().await?;
         // let resp2            = resp1.as_bytes();
         // let capabilities     = parse_soap(&resp2[..], "Capabilities", None, true, true);
@@ -211,8 +223,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_event_properties(onvif_url: url::Url) -> Result<()> {
-        let response         = client::send(onvif_url, Messages::GetEventProperties).await?;
+    async fn set_event_properties(onvif_url: url::Url, auth: Option<&Auth>) -> Result<()> {
+        let response         = client::send(onvif_url, Messages::GetEventProperties, auth).await?;
         let resp1            = response.text().await?;
         // let resp2            = resp1.as_bytes();
         // let capabilities     = parse_soap(&resp2[..], "Capabilities", None, true, true);
@@ -223,8 +235,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_event_brokers(onvif_url: url::Url) -> Result<()> {
-        let response         = client::send(onvif_url, Messages::GetEventBrokers).await?;
+    async fn set_event_brokers(onvif_url: url::Url, auth: Option<&Auth>) -> Result<()> {
+        let response         = client::send(onvif_url, Messages::GetEventBrokers, auth).await?;
         // let response                      = response.bytes().await?;
         let response                      = response.text().await?;
 
@@ -234,8 +246,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn pull_messages(onvif_url: url::Url) -> Result<()> {
-        let response         = client::send(onvif_url, Messages::PullMessages).await?; // let response                      = response.bytes().await?;
+    async fn pull_messages(onvif_url: url::Url, auth: Option<&Auth>) -> Result<()> {
+        let response         = client::send(onvif_url, Messages::PullMessages, auth).await?; // let response                      = response.bytes().await?;
         let response                      = response.text().await?;
 
         debug!("Pull Event Messages: \n{response}");
@@ -244,8 +256,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_service_profiles(onvif_url: url::Url) -> Result<()> {
-        let response                      = client::send(onvif_url, Messages::GetProfiles).await?;
+    async fn set_service_profiles(onvif_url: url::Url, auth: Option<&Auth>) -> Result<()> {
+        let response                      = client::send(onvif_url, Messages::GetProfiles, auth).await?;
         // let response                      = response.bytes().await?;
         let response                      = response.text().await?;
 
@@ -255,8 +267,8 @@ pub trait CameraBuilder {
     }
 
     #[rustfmt::skip]
-    async fn set_dns(onvif_url: url::Url) -> Result<()> {
-        let response                      = client::send(onvif_url, Messages::GetDNS).await?;
+    async fn set_dns(onvif_url: url::Url, auth: Option<&Auth>) -> Result<()> {
+        let response                      = client::send(onvif_url, Messages::GetDNS, auth).await?;
         // let response                      = response.bytes().await?;
         let response                      = response.text().await?;
 
@@ -265,8 +277,8 @@ pub trait CameraBuilder {
         Ok(())
     }
 
-    async fn set_dot11_status(onvif_url: url::Url) -> Result<()> {
-        let response = client::send(onvif_url, Messages::GetDot11Status).await?;
+    async fn set_dot11_status(onvif_url: url::Url, auth: Option<&Auth>) -> Result<()> {
+        let response = client::send(onvif_url, Messages::GetDot11Status, auth).await?;
         // let response                      = response.bytes().await?;
         let response = response.text().await?;
 
@@ -275,8 +287,8 @@ pub trait CameraBuilder {
         Ok(())
     }
 
-    async fn set_geo_location(onvif_url: url::Url) -> Result<()> {
-        let response = client::send(onvif_url, Messages::GetGeoLocation).await?;
+    async fn set_geo_location(onvif_url: url::Url, auth: Option<&Auth>) -> Result<()> {
+        let response = client::send(onvif_url, Messages::GetGeoLocation, auth).await?;
         // let response                      = response.bytes().await?;
         let response = response.text().await?;
 
@@ -285,10 +297,10 @@ pub trait CameraBuilder {
         Ok(())
     }
 
-    async fn set_pull_point_sub(onvif_url: url::Url) -> Result<()> {
+    async fn set_pull_point_sub(onvif_url: url::Url, auth: Option<&Auth>) -> Result<()> {
         debug!("Event Service URL: {onvif_url}");
         let response =
-            client::send(onvif_url, Messages::CreatePullPointSubscriptionRequest).await?;
+            client::send(onvif_url, Messages::CreatePullPointSubscriptionRequest, auth).await?;
         // let response                      = response.bytes().await?;
         let response = response.text().await?;
 

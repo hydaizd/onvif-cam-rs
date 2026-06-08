@@ -13,6 +13,7 @@ use anyhow::Result;
 use onvif_cam_rs::builder::camera::CameraBuilder;
 use onvif_cam_rs::client::{self, Messages};
 use onvif_cam_rs::device::camera::Camera;
+use onvif_cam_rs::device::Auth;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,6 +25,8 @@ async fn main() -> Result<()> {
     // Enumerate all Camera devices found
     for device in devices {
         let mut camera = Camera::new(device);
+        // Set auth if camera requires it
+        // camera.auth = Some(Auth::new("admin", "password"));
         camera.build_all().await?;
         cameras.push(camera);
     }

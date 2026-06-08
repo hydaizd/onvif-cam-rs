@@ -11,6 +11,23 @@ pub struct Device {
     pub url_onvif:     url::Url,
     pub device_type:   DeviceTypes,
     pub scopes:        Vec<String>,
+    pub auth:          Option<Auth>,
+}
+
+/// ONVIF WS-UsernameToken authentication credentials
+#[derive(Clone, Debug)]
+pub struct Auth {
+    pub username: String,
+    pub password: String,
+}
+
+impl Auth {
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Auth {
+            username: username.into(),
+            password: password.into(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -36,6 +53,7 @@ pub struct DeviceInfo {
 #[derive(Default)]
 #[rustfmt::skip]
 pub struct Profiles {
+    pub token:         Option<String>,
     pub name:          Option<String>,
     pub video_dim:     Option<(u32, u32)>,
     pub video_codec:   Option<String>,
@@ -84,7 +102,7 @@ pub trait ServiceCapabilities {
 #[rustfmt::skip]
 pub struct EventCapabilities {
     pub pause_support:            Option<bool>,
-    pub pull_point_supoort:       Option<bool>,
+    pub pull_point_support:       Option<bool>,
     pub sub_policy_support:       Option<bool>,
     pub max_notif_produce:        Option<u8>,
     pub max_pull_points:          Option<u8>,
@@ -99,7 +117,7 @@ impl ServiceCapabilities for EventCapabilities {
                 => self.pause_support = pair.1.parse().ok(),
             
             key if key.contains("PullPointSupport")
-                => self.pull_point_supoort = pair.1.parse().ok(),
+                => self.pull_point_support = pair.1.parse().ok(),
             
             key if key.contains("PolicySupport")
                 => self.sub_policy_support = pair.1.parse().ok(),

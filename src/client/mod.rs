@@ -1,9 +1,12 @@
-use crate::device::{parse_device_type, Device};
+use crate::device::{parse_device_type, Auth, Device};
 use crate::utils::parse_soap;
 
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use log::trace;
+use rand::Rng;
 use reqwest::Response;
+use sha1::{Digest, Sha1};
 use std::sync::OnceLock;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{net::UdpSocket, time::timeout};
@@ -22,7 +25,7 @@ pub enum Messages {
     Capabilities,
     DeviceInfo,
     Profiles,
-    GetStreamURI,
+    GetStreamURI(String),
     GetServices, // a summarized version of Capabilities
     GetServiceCapabilities,
     GetDNS,
@@ -80,7 +83,7 @@ pub async fn discover() -> Result<Vec<Device>> {
 
     // Get the XML SOAP message to broadcast
     let uuid = Uuid::new_v4();
-    let msg_discover = soap_msg(&Messages::Discovery, uuid);
+    let msg_discover = soap_msg(&Messages::Discovery, uuid, None);
 
     // Get responses to broadcast message
     let mut devices_found: Vec<Device> = Vec::new();
@@ -138,6 +141,7 @@ pub async fn discover() -> Result<Vec<Device>> {
                                 url_onvif,
                                 device_type,
                                 scopes,
+                                auth: None,
                             });
                         }
                     }
@@ -155,32 +159,31 @@ pub async fn discover() -> Result<Vec<Device>> {
 }
 
 /// Returns the response received when sending an ONVIF request to a
-/// device found via device discovery
-/// The response is SOAP formatted as byte array
+/// device found via device discovery.
+/// The response is SOAP formatted as byte array.
+///
+/// When `auth` is provided, WS-Security UsernameToken (password digest)
+/// is automatically added to the SOAP header.
 ///
 /// # Arguments
 ///
 /// * `onvif_url` - The main ONVIF service URL to the device
 /// * `msg` - The SOAP request as Messages Enum
+/// * `auth` - Optional authentication credentials
 ///
 /// # Examples
 ///
 /// ```
-/// let mut devices = client::discover().await?;
-/// let onvif_url = devices[0].base.url;
-///
-/// let response = client::send(onvif_url, Messages::GetStreamURI).await?;
-/// let stream_url = response.remove(0);
-///
-/// println!("RTP port for streaming video: {stream_url}");
+/// let auth = Auth::new("admin", "password");
+/// let response = client::send(onvif_url, Messages::GetStreamURI("profile_token".into()), Some(&auth)).await?;
 /// ```
-pub async fn send(onvif_url: url::Url, msg: Messages) -> Result<Response> {
+pub async fn send(onvif_url: url::Url, msg: Messages, auth: Option<&Auth>) -> Result<Response> {
     // Only generate uuid for Discovery messages that actually use it
     let uuid = match msg {
         Messages::Discovery => Uuid::new_v4(),
         _ => Uuid::nil(),
     };
-    let soap_msg = soap_msg(&msg, uuid);
+    let soap_msg = soap_msg(&msg, uuid, auth);
     let client = reqwest_client();
 
     for attempt in 1..=MAX_RETRIES {
@@ -221,31 +224,126 @@ fn reqwest_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(5) //复用 TCP 连接
+            .pool_max_idle_per_host(5)
             .build()
             .expect("Failed to create reqwest client")
     })
 }
 
-pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
-    let prefix = r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
-                         xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
-                 <Body>"#;
+/// Generate the WS-Security UsernameToken header with password digest
+/// as required by ONVIF specification.
+///
+/// Digest = Base64(SHA1(Nonce + Created + Password))
+fn ws_security_header(username: &str, password: &str) -> String {
+    let mut rng = rand::thread_rng();
 
-    let prefix_discovery = r#"<?xml version="1.0" encoding="UTF-8"?>
+    // Generate 16 random bytes for Nonce
+    let mut nonce_bytes = [0u8; 16];
+    rng.fill(&mut nonce_bytes);
+    let nonce_b64 = BASE64.encode(&nonce_bytes);
+
+    // Created timestamp in UTC (ISO 8601)
+    let created = chrono_countdown();
+
+    // Password Digest: Base64(SHA1(nonce_bytes + created + password))
+    let mut digest_input = nonce_bytes.to_vec();
+    digest_input.extend_from_slice(created.as_bytes());
+    digest_input.extend_from_slice(password.as_bytes());
+    let digest = BASE64.encode(Sha1::digest(&digest_input));
+
+    format!(
+        r#"<Header>
+        <Security s:mustUnderstand="1" xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+            <UsernameToken>
+                <Username>{username}</Username>
+                <Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{digest}</Password>
+                <Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">{nonce_b64}</Nonce>
+                <Created xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">{created}</Created>
+            </UsernameToken>
+        </Security>
+    </Header>"#
+    )
+}
+
+/// Generate a simple UTC timestamp string for WS-Security.
+/// Uses std::time to avoid pulling in chrono dependency.
+fn chrono_countdown() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    // Manual ISO 8601 formatting: YYYY-MM-DDTHH:MM:SSZ
+    let days_since_epoch = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Calculate year/month/day from days since epoch
+    let mut y = 1970i64;
+    let mut d = days_since_epoch as i64;
+    loop {
+        let days_in_year = if is_leap(y) { 366 } else { 365 };
+        if d < days_in_year {
+            break;
+        }
+        d -= days_in_year;
+        y += 1;
+    }
+    let m = month_from_day_of_year(d, is_leap(y));
+    let day = d - days_before_month(m, is_leap(y)) + 1;
+
+    format!("{y:04}-{m:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+fn days_before_month(month: i64, leap: bool) -> i64 {
+    match month {
+        1 => 0,
+        2 => 31,
+        3 => if leap { 60 } else { 59 },
+        4 => if leap { 91 } else { 90 },
+        5 => if leap { 121 } else { 120 },
+        6 => if leap { 152 } else { 151 },
+        7 => if leap { 182 } else { 181 },
+        8 => if leap { 213 } else { 212 },
+        9 => if leap { 244 } else { 243 },
+        10 => if leap { 274 } else { 273 },
+        11 => if leap { 305 } else { 304 },
+        12 => if leap { 335 } else { 334 },
+        _ => 0,
+    }
+}
+
+fn month_from_day_of_year(doy: i64, leap: bool) -> i64 {
+    for m in 1..=12 {
+        if doy < days_before_month(m + 1, leap) {
+            return m;
+        }
+    }
+    12
+}
+
+pub fn soap_msg(msg_type: &Messages, uuid: Uuid, auth: Option<&Auth>) -> String {
+    let prefix = r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
+                         xmlns:tds="http://www.onvif.org/ver10/device/wsdl">"#;
+
+    let prefix_profiles = r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
+                         xmlns:trt="http://www.onvif.org/ver10/media/wsdl">"#;
+
+    let prefix_stream_uri = r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
+                         xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+                         xmlns:tt="http://www.onvif.org/ver10/schema">"#;
+
+    let prefix_discovery_pt1 = r#"<?xml version="1.0" encoding="UTF-8"?>
                         <e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope"
                         xmlns:w="http://schemas.xmlsoap.org/ws/2004/08/addressing"
                         xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery"
                         xmlns:dn="http://www.onvif.org/ver10/network/wsdl">"#;
-
-    let prefix_profiles = r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
-                         xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
-                 <Body>"#;
-
-    let prefix_stream_uri = r#"<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
-                         xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
-                         xmlns:tt="http://www.onvif.org/ver10/schema">
-                 <Body>"#;
 
     // Insert UUID in the MessageID here
     let header_pt1 = format!("<e:Header><w:MessageID>uuid:{uuid}</w:MessageID>");
@@ -253,6 +351,7 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                      <w:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action>
                      </e:Header>"#;
 
+    let body_open = "<Body>";
     let suffix = "</Body></Envelope>";
     let suffix_discovery = r#"<e:Body>
                                    <d:Probe>
@@ -261,212 +360,101 @@ pub fn soap_msg(msg_type: &Messages, uuid: Uuid) -> String {
                                </e:Body>
                            </e:Envelope>"#;
 
-    let stream = r#"<trt:GetStreamUri>
-           <trt:StreamSetup>
-               <tt:Stream>RTP-multicast</tt:Stream>
+    let stream_prefix = r#"<trt:GetStreamUri>"#;
+    let stream_suffix = r#"<trt:StreamSetup>
+               <tt:Stream>RTP-Unicast</tt:Stream>
                <tt:Transport>
                    <tt:Protocol>RTSP</tt:Protocol>
                </tt:Transport>
            </trt:StreamSetup>
        </trt:GetStreamUri>"#;
 
+    // Build security header if auth is provided
+    let security_header = auth.map(|a| ws_security_header(&a.username, &a.password));
+
+    // For non-discovery messages, wrap with possible security header
+    let make_envelope = |env_prefix: &str, body: &str| -> String {
+        let header = match &security_header {
+            Some(sh) => format!("{sh}"),
+            None => String::new(),
+        };
+        format!(
+            "
+                {env_prefix}
+                {header}
+                {body_open}
+                {body}
+                {suffix}
+            "
+        )
+    };
+
     match msg_type {
         Messages::Discovery => format!(
             "
-                {prefix_discovery}
+                {prefix_discovery_pt1}
                 {header_pt1}
                 {header_pt2}
                 {suffix_discovery}
             "
         ),
-        Messages::Capabilities => format!(
-            "
-                {prefix}
-                <tds:GetCapabilities>
+        Messages::Capabilities => make_envelope(
+            prefix,
+            r#"<tds:GetCapabilities>
                 <tds:Category>All</tds:Category>
-                </tds:GetCapabilities>
-                {suffix}
-            "
+                </tds:GetCapabilities>"#,
         ),
-        Messages::DeviceInfo => format!(
-            "
-                {prefix}
-                <tds:GetDeviceInformation/>
-                {suffix}
-            "
+        Messages::DeviceInfo => make_envelope(prefix, "<tds:GetDeviceInformation/>"),
+        Messages::Profiles => make_envelope(prefix_profiles, "<trt:GetProfiles/>"),
+        Messages::GetStreamURI(ref profile_token) => make_envelope(
+            prefix_stream_uri,
+            &format!(
+                "{stream_prefix}
+                <trt:ProfileToken>{profile_token}</trt:ProfileToken>
+                {stream_suffix}"
+            ),
         ),
-        Messages::Profiles => format!(
-            "
-                {prefix_profiles}
-                <trt:GetProfiles/>
-                {suffix}
-            "
-        ),
-        Messages::GetStreamURI => format!(
-            "
-                {prefix_stream_uri}
-                {stream}
-                {suffix}
-            "
-        ),
-        Messages::GetServices => format!(
-            "
-                {prefix}
-                <tds:GetServices>
+        Messages::GetServices => make_envelope(
+            prefix,
+            r#"<tds:GetServices>
                 <tds:IncludeCapability>true</tds:IncludeCapability>
-                </tds:GetServices>
-                {suffix}
-            "
+                </tds:GetServices>"#,
         ),
-        Messages::GetServiceCapabilities => format!(
-            "
-                {prefix}
-                <tds:GetServiceCapabilities/>
-                {suffix}
-            "
-        ),
-        Messages::GetDNS => format!(
-            "
-                {prefix}
-                <tds:GetDNS/>
-                {suffix}
-            "
-        ),
-        Messages::GetNetworkInterfaces => format!(
-            "
-                {prefix}
-                <tds:GetNetworkInterfaces/>
-                {suffix}
-            "
-        ),
-        Messages::GetNetworkProtocols => format!(
-            "
-                {prefix}
-                <tds:GetNetworkProtocols/>
-                {suffix}
-            "
-        ),
-        Messages::GetNetworkDefaultGateway => format!(
-            "
-                {prefix}
-                <tds:GetNetworkDefaultGateway/>
-                {suffix}
-            "
-        ),
+        Messages::GetServiceCapabilities => make_envelope(prefix, "<tds:GetServiceCapabilities/>"),
+        Messages::GetDNS => make_envelope(prefix, "<tds:GetDNS/>"),
+        Messages::GetNetworkInterfaces => make_envelope(prefix, "<tds:GetNetworkInterfaces/>"),
+        Messages::GetNetworkProtocols => make_envelope(prefix, "<tds:GetNetworkProtocols/>"),
+        Messages::GetNetworkDefaultGateway => {
+            make_envelope(prefix, "<tds:GetNetworkDefaultGateway/>")
+        }
         // wifi功能
-        Messages::GetDot11Capabilities => format!(
-            "
-                {prefix}
-                <tds:GetDot11Capabilities/>
-                {suffix}
-            "
-        ),
+        Messages::GetDot11Capabilities => make_envelope(prefix, "<tds:GetDot11Capabilities/>"),
         // wifi连接状态
-        Messages::GetDot11Status => format!(
-            "
-                {prefix}
-                <tds:GetDot11Status/>
-                {suffix}
-            "
-        ),
-        // 仅部分设备支持
-        Messages::GetSystemUris => format!(
-            "
-                {prefix}
-                <tds:GetSystemUris/>
-                {suffix}
-            "
-        ),
-        // 仅部分设备支持
-        Messages::GetSystemLog => format!(
-            "
-                {prefix}
-                <tds:GetSystemLog/>
-                {suffix}
-            "
-        ),
-        Messages::GetDiscoveryMode => format!(
-            "
-                {prefix}
-                <tds:GetDiscoveryMode/>
-                {suffix}
-            "
-        ),
-        Messages::GetGeoLocation => format!(
-            "
-                {prefix}
-                <tds:GetGeoLocation/>
-                {suffix}
-            "
-        ),
-        Messages::GetStorageConfigurations => format!(
-            "
-                {prefix}
-                <tds:GetStorageConfigurations/>
-                {suffix}
-            "
-        ),
-        // CREATE PULL POINT WITH OPTIONAL PARAMS
-        // Messages::CreatePullPointSubscriptionRequest => format!(
-        //     "
-        //         {prefix}
-        //         <wsnt:CreatePullPointSubscription>
-        //             <wsnt:Filter>
-        //                 <wsnt:TopicExpression Dialect=\"http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet\">
-        //                     tns1:Device/tnsaxis:VMD/Camera1
-        //                 </wsnt:TopicExpression>
-        //                 <!-- Add more Filter elements if needed -->
-        //             </wsnt:Filter>
-        //             <wsnt:InitialTerminationTime>PT3600S</wsnt:InitialTerminationTime>
-        //             <!-- Add more subscription parameters if needed -->
-        //         </wsnt:CreatePullPointSubscription>
-        //         {suffix}
-        //     "
-        // ),
-        Messages::CreatePullPointSubscriptionRequest => format!(
-            "
-                {prefix}
-                <tev:CreatePullPointSubscription/>
-                {suffix}
-            "
-        ),
-        Messages::GetAnalyticsConfigurations => format!(
-            "
-                {prefix}
-                <tns:GetAnalyticsConfigurations/>
-                {suffix}
-            "
-        ),
-        Messages::GetEventProperties => format!(
-            "
-                {prefix}
-                <tds:GetEventProperties/>
-                {suffix}
-            "
-        ),
-        Messages::GetProfiles => format!(
-            "
-                {prefix}
-                <tr2:GetProfiles/>
-                {suffix}
-            "
-        ),
-        Messages::GetEventBrokers => format!(
-            "
-                {prefix}
-                <tds:GetEventBrokers/>
-                {suffix}
-            "
-        ),
-        Messages::PullMessages => format!(
-            "
-                {prefix}
-                <wsnt:PullMessages>
+        Messages::GetDot11Status => make_envelope(prefix, "<tds:GetDot11Status/>"),
+        // 部分设备支持
+        Messages::GetSystemUris => make_envelope(prefix, "<tds:GetSystemUris/>"),
+        // 部分设备支持
+        Messages::GetSystemLog => make_envelope(prefix, "<tds:GetSystemLog/>"),
+        Messages::GetDiscoveryMode => make_envelope(prefix, "<tds:GetDiscoveryMode/>"),
+        Messages::GetGeoLocation => make_envelope(prefix, "<tds:GetGeoLocation/>"),
+        Messages::GetStorageConfigurations => {
+            make_envelope(prefix, "<tds:GetStorageConfigurations/>")
+        }
+        Messages::CreatePullPointSubscriptionRequest => {
+            make_envelope(prefix, "<tev:CreatePullPointSubscription/>")
+        }
+        Messages::GetAnalyticsConfigurations => {
+            make_envelope(prefix, "<tns:GetAnalyticsConfigurations/>")
+        }
+        Messages::GetEventProperties => make_envelope(prefix, "<tds:GetEventProperties/>"),
+        Messages::GetProfiles => make_envelope(prefix, "<tr2:GetProfiles/>"),
+        Messages::GetEventBrokers => make_envelope(prefix, "<tds:GetEventBrokers/>"),
+        Messages::PullMessages => make_envelope(
+            prefix,
+            r#"<wsnt:PullMessages>
                     <wsnt:Timeout>PT5S</wsnt:Timeout>
                     <wsnt:MessageLimit>10</wsnt:MessageLimit>
-                </wsnt:PullMessages>
-                {suffix}
-            "
+                </wsnt:PullMessages>"#,
         ),
     }
 }

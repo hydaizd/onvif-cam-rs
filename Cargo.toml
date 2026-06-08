@@ -11,9 +11,11 @@ license = "MIT"
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1.73"
-bytes = "1.4.0"
+base64 = "0.21"
 log = "0.4.20"
+rand = "0.8"
 reqwest = "0.11"
+sha1 = "0.10"
 url = "2.4.0"
 xml-rs = "0.8"
 
